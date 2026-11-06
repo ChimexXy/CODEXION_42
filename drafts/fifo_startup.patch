@@ -1,0 +1,79 @@
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ CC = cc
+ CFLAGS = -Wall -Wextra -Werror -pthread -g
+ SRC = src/main.c src/parsing.c src/timing.c src/logging.c \
+-      src/heap.c src/heap_pop.c src/dongle.c src/acquire.c \
++      src/heap.c src/heap_pop.c src/dongle.c src/acquire.c src/fifo_start.c \
+       src/grant.c src/grant_wait.c src/worker.c src/worker_phases.c \
+       src/monitor.c src/edf_schedule.c src/init.c src/cleanup.c src/threads.c
+ OBJ = $(SRC:.c=.o)
+--- a/src/codexion.h
++++ b/src/codexion.h
+@@ -81,6 +81,7 @@
+ 	long long		start;
+ 	long long		cycle;
+ 	long long		seq;
++	int				fifo_queued;
+ 	int				ready;
+ 	int				stop;
+ 	int				mutex_ready;
+@@ -115,6 +116,7 @@
+ void		unlock_pair(t_sim *sim, int left, int right);
+ int			request_dongles(t_coder *coder);
+ void		queue_request_locked(t_coder *coder);
++void		queue_first_fifo_locked(t_coder *coder);
+ long long	edf_slot(t_coder *coder);
+ void		init_schedule(t_sim *sim);
+ int			try_grant_locked(t_coder *coder);
+--- a/src/acquire.c
++++ b/src/acquire.c
+@@ -45,7 +45,10 @@
+ 	long long	wait_ms;
+ 
+ 	sim = coder->sim;
+-	if (sim->cfg.policy != EDF || coder->compiles > 0)
++	if (sim->cfg.policy == FIFO && sim->cfg.count % 2 == 0
++		&& coder->compiles == 0)
++		queue_first_fifo_locked(coder);
++	else if (sim->cfg.policy != EDF || coder->compiles > 0)
+ 		queue_request_locked(coder);
+ 	while (!sim->stop)
+ 	{
+--- /dev/null
++++ b/src/fifo_start.c
+@@ -0,0 +1,33 @@
++/* ************************************************************************** */
++/*                                                                            */
++/*                                                        :::      ::::::::   */
++/*   fifo_start.c                                       :+:      :+:    :+:   */
++/*                                                    +:+ +:+         +:+     */
++/*   By: zhamza <zhamza@student.42.fr>              +#+  +:+       +#+        */
++/*                                                +#+#+#+#+#+   +#+           */
++/*   Created: 2026/11/06 02:36:16 by zhamza            #+#    #+#             */
++/*   Updated: 2026/11/06 02:36:35 by zhamza           ###   ########.fr       */
++/*                                                                            */
++/* ************************************************************************** */
++
++#include "codexion.h"
++
++void	queue_first_fifo_locked(t_coder *coder)
++{
++	t_sim	*sim;
++	int		rank;
++
++	sim = coder->sim;
++	rank = (coder->id - 1) / 2;
++	if (coder->id % 2 == 0)
++		rank += sim->cfg.count / 2;
++	while (!sim->stop && sim->fifo_queued != rank)
++		pthread_cond_wait(&sim->changed, &sim->mutex);
++	if (sim->stop)
++		return ;
++	queue_request_locked(coder);
++	sim->fifo_queued++;
++	pthread_cond_broadcast(&sim->changed);
++	while (!sim->stop && sim->fifo_queued < sim->cfg.count)
++		pthread_cond_wait(&sim->changed, &sim->mutex);
++}
